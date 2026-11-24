@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f7b4f">
+<link rel="manifest" href="manifest.json">
+<title>Attendance</title>
+<style>
+:root{--bg:#e9eef4;--card:#fff;--ink:#1a2433;--mute:#5b6b7e;--in:#0f7b4f;--out:#2f4b8f;--line:#d3dbe5;box-sizing:border-box;padding:env(safe-area-inset-top,0px) 0 env(safe-area-inset-bottom,0px)}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:460px;margin:0 auto;padding:28px 18px 40px}
+.date{margin:0;color:var(--mute)}
+#time{margin:2px 0 24px;font-size:clamp(52px,17vw,76px);font-weight:300;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1}
+section{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px}
+label{display:block;font-size:14px;color:var(--mute);margin-bottom:6px}
+input{width:100%;font:inherit;padding:13px 14px;border:1px solid var(--line);border-radius:10px;margin-bottom:14px;background:#fff;color:var(--ink)}
+input:focus,button:focus-visible{outline:3px solid #7aa2e8;outline-offset:1px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{font:600 17px system-ui,sans-serif;border:0;border-radius:12px;padding:17px 8px;color:#fff;background:var(--in);width:100%}
+.out{background:var(--out)}
+.ghost{background:#e4e9f0;color:var(--ink)}
+button:disabled{opacity:.5}
+video,.prev{width:100%;border-radius:12px;background:#000;display:block;margin-bottom:12px}
+#cancel{margin-top:10px}
+#msg{min-height:24px;margin:14px 0 0;text-align:center;font-size:15px}
+.ok{color:var(--in)}.err{color:#b42318}
+.hide{display:none!important}
+</style>
+</head>
+<body>
+<main>
+  <p class="date" id="date"></p>
+  <h1 id="time">--:--:--</h1>
+
+  <section id="home">
+    <label for="name">Name</label>
+    <input id="name" autocomplete="name">
+    <label for="shift">Shift</label>
+    <input id="shift" placeholder="e.g. Morning, 07:00–15:00">
+    <div class="row">
+      <button id="in">Clock in</button>
+      <button id="out" class="out">Clock out</button>
+    </div>
+  </section>
+
+  <section id="cam" class="hide">
+    <video id="vid" autoplay playsinline muted></video>
+    <img id="prev" class="prev hide" alt="Photo preview">
+    <button id="snap">Take photo</button>
+    <div class="row hide" id="after">
+      <button id="retake" class="ghost">Retake</button>
+      <button id="send">Send</button>
+    </div>
+    <button id="cancel" class="ghost">Cancel</button>
+  </section>
+
+  <p id="msg"></p>
+</main>
+
+<script>
+// Paste the Web app URL from Google Apps Script here (see Code.gs)
+const SCRIPT_URL = 'PASTE_YOUR_WEB_APP_URL_HERE';
+
+const $ = id => document.getElementById(id);
+const say = (t, c = '') => { $('msg').textContent = t; $('msg').className = c; };
+const val = k => $(k).value.trim();
+let type, geo, shot, stamp, addr = '', stream;
+
+// remember name and shift on this phone
+for (const k of ['name', 'shift']) {
+  try { $(k).value = localStorage.getItem(k) || ''; } catch (e) {}
+  $(k).oninput = () => { try { localStorage.setItem(k, $(k).value); } catch (e) {} };
+}
+
+// live clock
+const tick = () => {
+  const d = new Date();
+  $('time').textContent = d.toLocaleTimeString('en-GB');
+  $('date').textContent = d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+};
+tick(); setInterval(tick, 1000);
+
+const view = v => { $('home').classList.toggle('hide', v !== 'home'); $('cam').classList.toggle('hide', v !== 'cam'); };
+const live = on => {
+  $('vid').classList.toggle('hide', !on); $('snap').classList.toggle('hide', !on);
+  $('prev').classList.toggle('hide', on); $('after').classList.toggle('hide', on);
+};
+const stop = () => { if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; };
+
+async function openCam() {
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false }); }
+  catch (e) { say('Camera is blocked. Allow camera access and try again.', 'err'); return; }
+  $('vid').srcObject = stream; live(true); view('cam');
+}
+
+async function start(t) {
+  if (!val('name') || !val('shift')) return say('Enter your name and shift first.', 'err');
+  type = t; say('Getting your location…');
+  try {
+    geo = await new Promise((ok, no) => navigator.geolocation.getCurrentPosition(ok, no, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 }));
+  } catch (e) { return say('Location is blocked. Allow location access and try again.', 'err'); }
+  say(''); openCam();
+}
+
+async function place(lat, lng) {
+  try {
+    const c = new AbortController(); setTimeout(() => c.abort(), 4000);
+    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&zoom=17&lat=${lat}&lon=${lng}`, { signal: c.signal });
+    return (await r.json()).display_name || '';
+  } catch (e) { return ''; }
+}
+
+function wrap(x, t, max) {
+  const out = []; let l = '';
+  for (const w of t.split(' ')) {
+    const n = l ? l + ' ' + w : w;
+    if (x.measureText(n).width > max && l) { out.push(l); l = w; } else l = n;
+  }
+  if (l) out.push(l);
+  return out;
+}
+
+$('snap').onclick = async () => {
+  const v = $('vid'); if (!v.videoWidth) return;
+  $('snap').disabled = true; say('Adding location to the photo…');
+  const { latitude: la, longitude: lo } = geo.coords;
+  addr = await place(la, lo);
+  stamp = new Date().toLocaleString('sv-SE');
+  const s = Math.min(1, 1000 / v.videoWidth), cv = document.createElement('canvas');
+  cv.width = Math.round(v.videoWidth * s); cv.height = Math.round(v.videoHeight * s);
+  const x = cv.getContext('2d'); x.drawImage(v, 0, 0, cv.width, cv.height);
+
+  const fs = Math.round(cv.width / 30), pad = fs * .8;
+  x.font = `600 ${fs}px system-ui, sans-serif`;
+  const head = [`${type} – ${val('name')}`, `Shift: ${val('shift')}`, stamp, `${la.toFixed(6)}, ${lo.toFixed(6)}`];
+  const L = [...head.flatMap(t => wrap(x, t, cv.width - pad * 2)), ...wrap(x, addr, cv.width - pad * 2).slice(0, 2)];
+  const lh = fs * 1.3, bh = L.length * lh + fs;
+  x.fillStyle = 'rgba(0,0,0,.6)'; x.fillRect(0, cv.height - bh, cv.width, bh);
+  x.fillStyle = '#fff'; x.textBaseline = 'top';
+  L.forEach((t, i) => x.fillText(t, pad, cv.height - bh + fs * .5 + i * lh));
+
+  shot = cv.toDataURL('image/jpeg', .75);
+  $('prev').src = shot; stop(); live(false);
+  $('snap').disabled = false; say('');
+};
+
+$('send').onclick = async () => {
+  if (SCRIPT_URL.includes('PASTE')) return say('Set SCRIPT_URL in index.html first.', 'err');
+  $('send').disabled = true; say('Sending…');
+  const c = geo.coords;
+  try {
+    const r = await fetch(SCRIPT_URL, { method: 'POST', body: JSON.stringify({
+      name: val('name'), shift: val('shift'), type, deviceTime: stamp,
+      lat: c.latitude, lng: c.longitude, accuracy: Math.round(c.accuracy), address: addr, photo: shot }) });
+    const j = await r.json(); if (!j.ok) throw 0;
+    say(`${type} saved.`, 'ok'); view('home');
+  } catch (e) { say('Could not send. Check your connection and try again.', 'err'); }
+  $('send').disabled = false;
+};
+
+$('in').onclick = () => start('Clock in');
+$('out').onclick = () => start('Clock out');
+$('retake').onclick = openCam;
+$('cancel').onclick = () => { stop(); view('home'); say(''); };
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+</script>
+</body>
+</html>
